@@ -1,85 +1,51 @@
 import express from "express";
 import axios from "axios";
+import { exec } from "child_process";
 import fs from "fs";
-import { spawn } from "child_process";
+import path from "path";
 
 const app = express();
 app.use(express.json());
 
-function extractFileId(url) {
-  const match = url.match(/[-\w]{25,}/);
-  return match ? match[0] : null;
-}
+const TMP = "/tmp";  // works on Railway
 
-app.post("/api/drive", async (req, res) => {
-  try {
-    const { url } = req.body;
-
-    if (!url) return res.status(400).json({ error: "url required" });
-
-    const fileId = extractFileId(url);
-    if (!fileId) return res.status(400).json({ error: "invalid drive url" });
-
-    const direct = `https://drive.google.com/uc?export=download&id=${fileId}`;
-
-    return res.json({ direct });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "server error" });
-  }
-});
-
-
-// 🟣 NEW — TRIM ENDPOINT
 app.post("/api/trim", async (req, res) => {
   try {
+
     const { url, start, end } = req.body;
 
     if (!url) return res.status(400).json({ error: "url required" });
-    if (start == null || end == null) return res.status(400).json({ error: "start and end required" });
+    if (start == null || end == null) return res.status(400).json({ error: "start/end required" });
 
-    const duration = end - start;
-    if (duration <= 0) return res.status(400).json({ error: "invalid duration" });
+    console.log("▶ trim request:", url, start, end);
 
-    // Temp input/output files
-    const input = "/tmp/input.mp4";
-    const output = "/tmp/output.mp4";
+    const input = path.join(TMP, "input.mp4");
+    const output = path.join(TMP, "output.mp4");
 
-    // Download file
-    const response = await axios({
-      url,
-      method: "GET",
-      responseType: "stream"
-    });
-
+    // download
     const writer = fs.createWriteStream(input);
+    const response = await axios({ url, method: "GET", responseType: "stream" });
     response.data.pipe(writer);
 
-    await new Promise((resolve) => writer.on("finish", resolve));
+    await new Promise(resolve => writer.on("finish", resolve));
 
-    // Run ffmpeg trim
-    const ff = spawn("ffmpeg", [
-      "-ss", String(start),
-      "-i", input,
-      "-t", String(duration),
-      "-c", "copy",
-      output
-    ]);
+    // ffmpeg trim
+    const cmd = `ffmpeg -y -i ${input} -ss ${start} -to ${end} -c copy ${output}`;
+    await execPromise(cmd);
 
-    ff.stderr.on("data", (d) => console.log(d.toString()));
-
-    ff.on("close", () => {
-      res.download(output, "trimmed.mp4", () => {
-        fs.unlinkSync(input);
-        fs.unlinkSync(output);
-      });
-    });
+    return res.download(output);
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "server error" });
+    console.error("❌ TRIM FAILED", err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(3000, () => console.log("Server running on 3000"));
+function execPromise(cmd) {
+  return new Promise((resolve, reject) =>
+    exec(cmd, (err) => err ? reject(err) : resolve())
+  );
+}
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => console.log("Server running", PORT));
